@@ -52,7 +52,6 @@ function ReActAgent(question, userConfig) {
 	  throw new Error('please provide callLLM function');
 	}
   
-	// Configuration setup
 	const config = {
 	  mode: 'scratchpad', // 'scratchpad' or 'messages'
 	  ...userConfig,
@@ -72,17 +71,8 @@ function ReActAgent(question, userConfig) {
 	const historyHandler = historyManager(FORMAT_INSTRUCTIONS, config.mode);
 	historyHandler.append(`Question: ${question}`, "user");
   
-	let isWaitingForObservation = false;
-	let currentAction = null;
-	let currentActionInput = null;
-  
 	// Step function to advance the reasoning and parse the next action
-	async function step() {
-	  if (isWaitingForObservation) {
-		throw new Error('Agent is waiting for an observation. Call observe() first.');
-	  }
-  
-	  // Call LLM to advance reasoning
+	async function step() {  
 	  const reasoning = await config.callLLM(historyHandler.history());
 	  console.log("Raw Reasoning:", reasoning);
   
@@ -90,40 +80,24 @@ function ReActAgent(question, userConfig) {
 	  const observationIndex = reasoning.indexOf('Observation:');
 	  const trimmedReasoning = observationIndex !== -1 ? reasoning.substring(0, observationIndex).trim() : reasoning;
   
-	  // Append reasoning to history
 	  historyHandler.append(trimmedReasoning);
   
-	  // Check if final answer has been reached
 	  if (trimmedReasoning.includes("Final Answer")) {
 		return { done: true, messages: historyHandler.history(), answer: trimmedReasoning };
 	  }
   
-	  // Parse the action
 	  const actionData = parseAction(trimmedReasoning);
 	  if (!actionData) {
 		return { done: true, messages: historyHandler.history() }; // Stop if no valid action is found
 	  }
   
-	  // Store action details and set to waiting state
-	  isWaitingForObservation = true;
-	  currentAction = actionData.action;
-	  currentActionInput = actionData.actionInput;
-  
 	  // Return action to execute externally
-	  return { done: false, action: currentAction, actionInput: currentActionInput };
+	  return { done: false, ...actionData };
 	}
   
-	// Observe function to handle the observation and reset waiting state
 	function observe(observation) {
-	  if (!isWaitingForObservation) {
-		throw new Error('Agent is not waiting for an observation.');
-	  }
-  
-	  console.log("Observation Result:", observation);
-  
-	  // Append the observation to the history and reset state
+	  console.log("Observation Result:", observation);  
 	  historyHandler.append(`Observation: ${observation}`, "system");
-	  isWaitingForObservation = false;
 	}
   
 	return { step, observe };
