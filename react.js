@@ -47,102 +47,86 @@ function parseAction(reasoning) {
 	return null; // Return null if no action is found
 }
 
-async function executeTool(tools, action, actionInput) {
-	if (tools[action]) {
-		return await tools[action](actionInput);
-	} else {
-		throw new Error(`Invalid action: ${action}`);
-	}
-}
-
-// Main loop to handle reasoning, action execution, and history updates
-async function runAgentLoop(callLLM, tools, historyHandler, roundLimit) {
-	let round = 0;
-
-	while (true) {
-		if (++round > roundLimit) {
-			console.log('roundLimit exceeded: ' + (round - 1));
-			break;
-		}
-
-		console.log(`Round ${round}:`);
-
-		// Step 1: Call GPT-4 to reason
-		let reasoning = await callLLM(historyHandler.history());
-		console.log("Raw Reasoning:", reasoning);
-
-		// Trim response after 'Observation:'
-		const observationIndex = reasoning.indexOf('Observation:');
-		if (observationIndex !== -1) {
-			reasoning = reasoning.substring(0, observationIndex).trim();
-		}
-
-		// Step 2: Append the reasoning to the history
-		historyHandler.append(reasoning);
-
-		// Step 3: Parse the action and execute the tool
-		const actionData = parseAction(reasoning);
-		if (!actionData) {
-			console.log("No valid action found.");
-			break;
-		}
-
-		const { action, actionInput } = actionData;
-
-		try {
-			const observation = await executeTool(tools, action, actionInput);
-			console.log("Observation Result:", observation);
-
-			// Step 4: Append the observation to the history
-			historyHandler.append(`Observation: ${observation}`, "system");
-
-			// Check if final answer is reached
-			if (reasoning.includes("Final Answer")) {
-				console.log("Final Answer:", reasoning);
-				break;
-			}
-		} catch (error) {
-			console.error(error.message);
-			break;
-		}
-
-		console.log("Current Messages:", historyHandler.history());
-	}
-
-	return historyHandler.history();
-}
-
-function ReActAgent(userConfig) {
+function ReActAgent(question, userConfig) {
 	if (!userConfig.callLLM) {
-		throw new Error('please provide callLLM function');
+	  throw new Error('please provide callLLM function');
 	}
-
-	let config = {
-		mode: 'scratchpad', // 'scratchpad' or 'messages'
-		roundLimit: 6,
-		tools: []
+  
+	// Configuration setup
+	const config = {
+	  mode: 'scratchpad', // 'scratchpad' or 'messages'
+	  ...userConfig,
 	};
-	Object.assign(config, userConfig);
-
 	const toolSignatures = Object.entries(config.tools).map(([name, func]) => getFunctionSignature(func)).join(", ");
+	// Formatting instructions
 	const FORMAT_INSTRUCTIONS = `Use the following format:
-
-		Question: the input question you must answer
-		Thought: you should always think about what to do
-		Action: the action to take, should be one of [${toolSignatures}].
-		Observation: the result of the action
-		... (this Thought/Action/Observation can repeat N times)
-		Thought: I now know the final answer
-		Final Answer: the final answer to the original input question`;
-
-	function run(question) {
-		const historyHandler = historyManager(FORMAT_INSTRUCTIONS, config.mode);
-		historyHandler.append(`Question: ${question}`, "user");
-
-		return runAgentLoop(config.callLLM, config.tools, historyHandler, config.roundLimit);
+	  Question: the input question you must answer
+	  Thought: you should always think about what to do
+	  Action: the action to take, should be one of [${toolSignatures}].
+	  Observation: the result of the action
+	  ... (this Thought/Action/Observation can repeat N times)
+	  Thought: I now know the final answer
+	  Final Answer: the final answer to the original input question`;
+  
+	// Initialize the history manager with the question
+	const historyHandler = historyManager(FORMAT_INSTRUCTIONS, config.mode);
+	historyHandler.append(`Question: ${question}`, "user");
+  
+	let isWaitingForObservation = false;
+	let currentAction = null;
+	let currentActionInput = null;
+  
+	// Step function to advance the reasoning and parse the next action
+	async function step() {
+	  if (isWaitingForObservation) {
+		throw new Error('Agent is waiting for an observation. Call observe() first.');
+	  }
+  
+	  // Call LLM to advance reasoning
+	  const reasoning = await config.callLLM(historyHandler.history());
+	  console.log("Raw Reasoning:", reasoning);
+  
+	  // Trim the response after 'Observation:' if present
+	  const observationIndex = reasoning.indexOf('Observation:');
+	  const trimmedReasoning = observationIndex !== -1 ? reasoning.substring(0, observationIndex).trim() : reasoning;
+  
+	  // Append reasoning to history
+	  historyHandler.append(trimmedReasoning);
+  
+	  // Check if final answer has been reached
+	  if (trimmedReasoning.includes("Final Answer")) {
+		return { done: true, messages: historyHandler.history(), answer: trimmedReasoning };
+	  }
+  
+	  // Parse the action
+	  const actionData = parseAction(trimmedReasoning);
+	  if (!actionData) {
+		return { done: true, messages: historyHandler.history() }; // Stop if no valid action is found
+	  }
+  
+	  // Store action details and set to waiting state
+	  isWaitingForObservation = true;
+	  currentAction = actionData.action;
+	  currentActionInput = actionData.actionInput;
+  
+	  // Return action to execute externally
+	  return { done: false, action: currentAction, actionInput: currentActionInput };
 	}
-
-	return { run };
-}
-
+  
+	// Observe function to handle the observation and reset waiting state
+	function observe(observation) {
+	  if (!isWaitingForObservation) {
+		throw new Error('Agent is not waiting for an observation.');
+	  }
+  
+	  console.log("Observation Result:", observation);
+  
+	  // Append the observation to the history and reset state
+	  historyHandler.append(`Observation: ${observation}`, "system");
+	  isWaitingForObservation = false;
+	}
+  
+	return { step, observe };
+  }
+  
 module.exports = { ReActAgent };
